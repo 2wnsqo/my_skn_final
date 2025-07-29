@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx -y @smithery/cli@latest run @supabase-community/supabase-mcp --key 7ba9be74-534b-48c5-8470-38fbb7e1c77d --profile sympathetic-boar-5vfxBu list-tables)"
+    ],
+    "deny": []
+  }
+}
