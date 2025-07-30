@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from typing import List, Dict
 import time
 import re
+import statistics
 
 load_dotenv()
 
@@ -204,7 +205,7 @@ def evaluate_with_gpt(prompt: str) -> str:
                 {"role": "system", "content": "너는 매우 엄격한 면접관입니다. 반말 사용 시 반드시 50점을 차감하고, 출력 형식을 반드시 지키세요. 예의없는 답변에는 절대 관대하지 마세요."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1  # 일관성 개선을 위해 0.3 → 0.1로 낮춤
+            temperature=0.1  # 면접 평가에 적합한 설정
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

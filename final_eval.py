@@ -17,6 +17,7 @@ import json
 import re
 import os
 import datetime
+import statistics
 from num_eval import score_interview_data, load_interview_data, load_encoder, load_model
 from text_eval import evaluate_all
 
@@ -71,9 +72,83 @@ def call_llm(prompt):
             {"role": "system", "content": "당신은 전문적인 인사 담당자입니다. 일관된 어조와 말투로 평가와 피드백을 제공해주세요. 반드시 출력 형식을 지켜주세요."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.2
+        temperature=0.1
     )
     return response.choices[0].message.content.strip()
+
+def call_llm_with_ensemble(prompt, num_evaluations=3):
+    """
+    3번 평가 후 앙상블로 최종 결과 생성
+    
+    Args:
+        prompt (str): GPT-4o에게 전달할 프롬프트
+        num_evaluations (int): 평가 횟수 (기본 3회)
+        
+    Returns:
+        dict: {"result": str, "confidence": float, "scores": list}
+    """
+    print(f"🔄 앙상블 평가 시작 ({num_evaluations}회)")
+    
+    evaluations = []
+    scores = []
+    
+    # 다중 평가 실행
+    for i in range(num_evaluations):
+        try:
+            result = call_llm(prompt)
+            evaluations.append(result)
+            
+            # 점수 추출
+            score_match = re.search(r'\[최종 점수\]:\s*(\d+)', result)
+            if score_match:
+                score = int(score_match.group(1))
+                scores.append(score)
+                print(f"  평가 {i+1}: {score}점")
+            else:
+                print(f"  평가 {i+1}: 점수 추출 실패")
+                
+        except Exception as e:
+            print(f"  평가 {i+1} 실패: {e}")
+            continue
+    
+    if not evaluations:
+        print("❌ 모든 평가 실패")
+        return {"result": "평가 실패", "confidence": 0.0, "scores": []}
+    
+    # 점수 안정화
+    if scores:
+        final_score = int(round(statistics.median(scores)))  # 중앙값으로 변경하고 정수 보장
+        score_variance = statistics.variance(scores) if len(scores) > 1 else 0.0
+        confidence = max(0.0, min(1.0, 1.0 - score_variance / 100.0))
+        
+        # 중앙값에 가장 가까운 평가 선택
+        best_idx = min(range(len(scores)), key=lambda i: abs(scores[i] - final_score))
+        best_evaluation = evaluations[best_idx]
+        
+        # 점수를 최종 점수로 교체
+        final_result = re.sub(
+            r'\[최종 점수\]:\s*\d+', 
+            f'[최종 점수]: {final_score}', 
+            best_evaluation
+        )
+        
+        print(f"✅ 최종 점수: {final_score}점 (신뢰도: {confidence:.2f})")
+        print(f"   점수 분포: {scores} → 중앙값: {final_score}")
+        
+    else:
+        # 점수가 없으면 첫 번째 평가 사용
+        final_result = evaluations[0]
+        confidence = 0.5
+        final_score = 50  # 이미 정수
+        
+        print(f"⚠️ 점수 추출 실패, 기본 평가 사용 (신뢰도: {confidence})")
+    
+    return {
+        "result": final_result,
+        "confidence": confidence,
+        "scores": scores,
+        "final_score": final_score
+    }
 
 def parse_llm_result(llm_result):
     """
@@ -152,12 +227,12 @@ def process_realtime_results(realtime_data, company_info):
         ml_score = item.get("ml_score", 0)  # num_eval.py에서 생성된 점수
         llm_evaluation = item.get("llm_evaluation", "")  # text_eval.py에서 생성된 평가
         
-        # ML 점수와 LLM 평가를 결합한 최종 통합 평가
+        # ML 점수와 LLM 평가를 결합한 최종 통합 평가 (앙상블 적용)
         final_prompt = build_final_prompt(question, answer, ml_score, llm_evaluation)
-        final_result = call_llm(final_prompt)
+        ensemble_result = call_llm_with_ensemble(final_prompt)
         
         # 결과에서 구조화된 정보 추출
-        final_score, parsed_intent, evaluation, improvement = parse_llm_result(final_result)
+        final_score, parsed_intent, evaluation, improvement = parse_llm_result(ensemble_result["result"])
         
         # 최종 결과 형태로 구성
         final_results.append({
@@ -201,10 +276,10 @@ def run_final_evaluation_from_realtime(realtime_data=None, company_info=None, re
     #    (ML점수 + LLM평가 → 통합점수 + 상세평가)
     per_question = process_realtime_results(realtime_data, company_info)
     
-    # 3. 전체 면접에 대한 종합 평가 수행
+    # 3. 전체 면접에 대한 종합 평가 수행 (앙상블 적용)
     overall_prompt = build_overall_prompt(per_question)
-    overall_result = call_llm(overall_prompt)
-    overall_score, overall_feedback, summary = parse_overall_llm_result(overall_result)
+    overall_ensemble_result = call_llm_with_ensemble(overall_prompt)
+    overall_score, overall_feedback, summary = parse_overall_llm_result(overall_ensemble_result["result"])
     
     # 4. 최종 결과 구성 (기존 포맷과 동일)
     final_results = {
