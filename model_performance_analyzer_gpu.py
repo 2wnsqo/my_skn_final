@@ -499,23 +499,29 @@ class ModelPerformanceAnalyzerGPU:
                         if final_result.get('success') and final_result.get('per_question'):
                             per_q_result = final_result['per_question'][0]
                             
-                            # 실제 평가 텍스트 추출 (다양한 필드명 시도)
-                            evaluation_text = (
-                                per_q_result.get('evaluation', '') or 
-                                per_q_result.get('llm_evaluation', '') or
-                                per_q_result.get('feedback', '') or
-                                result.get('llm_evaluation', '')
-                            )
+                            # 실제 평가 텍스트 추출 - run_final_evaluation_from_memory 구조에 맞게 수정
+                            evaluation_text = per_q_result.get('evaluation', '')
+                            improvement_text = per_q_result.get('improvement', '')
                             
-                            improvement_text = (
-                                per_q_result.get('improvement', '') or
-                                per_q_result.get('suggestions', '') or
-                                per_q_result.get('recommendation', '') or
-                                "더 구체적인 예시를 포함하면 답변의 설득력이 향상될 것입니다."
-                            )
+                            # 디버깅을 위한 로그 추가
+                            print(f"🔍 Debug - per_q_result keys: {list(per_q_result.keys())}")
+                            print(f"🔍 Debug - evaluation_text length: {len(evaluation_text) if evaluation_text else 0}")
+                            print(f"🔍 Debug - improvement_text length: {len(improvement_text) if improvement_text else 0}")
                             
-                            # 텍스트가 비어있거나 너무 짧으면 다양한 기본 텍스트 사용
-                            if not evaluation_text or len(evaluation_text) < 10:
+                            # 실제 텍스트가 있으면 사용, 없으면 기본 텍스트
+                            if evaluation_text and len(evaluation_text.strip()) > 20:
+                                print(f"✅ 실제 LLM 평가 텍스트 사용: {evaluation_text[:50]}...")
+                            else:
+                                print(f"⚠️  실제 평가 텍스트 없음, fallback 사용")
+                            
+                            if improvement_text and len(improvement_text.strip()) > 20:
+                                print(f"✅ 실제 개선사항 텍스트 사용: {improvement_text[:50]}...")
+                            else:
+                                print(f"⚠️  실제 개선사항 텍스트 없음, fallback 사용")
+                                improvement_text = "더 구체적인 예시를 포함하면 답변의 설득력이 향상될 것입니다."
+                            
+                            # 텍스트가 비어있거나 너무 짧으면 다양한 기본 텍스트 사용 (실제 텍스트가 없는 경우만)
+                            if not evaluation_text or len(evaluation_text.strip()) < 20:
                                 evaluation_templates = [
                                     f"답변에서 {sample['question'][:10]}에 대한 이해도가 나타납니다. 경험을 바탕으로 한 구체적인 사례를 제시하여 답변의 신뢰성이 높습니다.",
                                     f"전문적인 지식과 실무 경험이 잘 드러나는 답변입니다. 특히 문제 해결 과정에서의 접근 방식이 체계적입니다.",
@@ -525,7 +531,7 @@ class ModelPerformanceAnalyzerGPU:
                                 ]
                                 evaluation_text = evaluation_templates[i % len(evaluation_templates)]
                             
-                            if not improvement_text or len(improvement_text) < 10:
+                            if not improvement_text or len(improvement_text.strip()) < 20:
                                 improvement_templates = [
                                     "구체적인 수치나 결과를 포함하여 성과를 더 명확히 제시하면 좋겠습니다.",
                                     "어려움을 극복한 구체적인 방법론이나 프로세스를 추가로 설명해주세요.",
@@ -562,7 +568,7 @@ class ModelPerformanceAnalyzerGPU:
                         'question': sample['question'][:50] + "...",
                         'evaluation': evaluation_text,
                         'improvement': improvement_text,
-                        'llm_raw_evaluation': result.get('llm_evaluation', '') if 'result' in locals() else "기본 평가"
+                        'llm_raw_evaluation': final_result.get('overall_feedback', '') if final_result else "기본 평가"
                     })
                     
                 except Exception as e:
