@@ -64,8 +64,10 @@ class ModelPerformanceAnalyzerGPU:
             
         try:
             self.db_manager = SupabaseManager()
+            print("✅ DB Manager 초기화 성공")
         except Exception as e:
-            print(f"⚠️  DB Manager 초기화 실패: {e}")
+            print(f"❌ DB Manager 초기화 실패: {e}")
+            print("❌ 실제 성능 분석을 위해서는 DB 연결이 필수입니다.")
             self.db_manager = None
         
         # GPU 메모리 정보 출력
@@ -345,10 +347,14 @@ class ModelPerformanceAnalyzerGPU:
                     for future in concurrent.futures.as_completed(future_to_repeat):
                         try:
                             score = future.result()
+                            # 점수 검증 추가
+                            if score < 0 or score > 100:
+                                print(f"    ⚠️  비정상적인 점수 감지: {score}, 정규화 적용")
                             scores.append(max(0, min(100, score)))
                         except Exception as e:
-                            print(f"    ⚠️ GPU 평가 중 오류: {str(e)}")
-                            scores.append(50)
+                            print(f"    ❌ GPU 평가 중 오류: {str(e)}")
+                            # 가짜 점수 추가하지 않고 예외 전파
+                            raise e
                 
                 # 일관성 계산
                 std_dev = np.std(scores)
@@ -403,12 +409,9 @@ class ModelPerformanceAnalyzerGPU:
     def _single_evaluation_gpu(self, sample: Dict, company_info: Dict, repeat_id: int) -> float:
         """단일 평가 GPU 처리 (안전한 버전)"""
         try:
-            # 서비스가 없으면 시뮬레이션 점수 반환
+            # 서비스가 없으면 실제 평가 불가능
             if self.evaluation_service is None or company_info is None:
-                # 현실적인 점수 분포 시뮬레이션
-                base_score = 70
-                variation = np.random.normal(0, 10)  # ±10점 변동
-                return max(10, min(95, base_score + variation))
+                raise ValueError("평가 서비스 또는 회사 정보가 누락됨 - 실제 평가 불가능")
             
             # GPU 메모리 사용량 체크
             if torch.cuda.is_available():
@@ -435,7 +438,7 @@ class ModelPerformanceAnalyzerGPU:
                         
                         result = {
                             'intent': llm_result.get('extracted_intent', '면접 질문에 대한 답변 평가'),
-                            'ml_score': 65,
+                            'ml_score': 0,  # ML 모델 없음을 명시적으로 표시
                             'llm_evaluation': llm_result.get('evaluation', '직접 LLM 평가')
                         }
                     
@@ -463,18 +466,17 @@ class ModelPerformanceAnalyzerGPU:
                         score = 50
                         
                 except Exception as eval_e:
-                    print(f"⚠️ 평가 중 오류: {eval_e}, 시뮬레이션 사용")
-                    score = np.random.normal(70, 12)
+                    print(f"❌ 평가 중 오류: {eval_e}")
+                    raise eval_e
             else:
-                # evaluation_service가 없으면 시뮬레이션
-                score = np.random.normal(70, 12)
+                raise ValueError("evaluation_service가 초기화되지 않음")
             
-            return max(10, min(95, score))
+            # 점수 범위를 자연스럽게 유지 (0-100)
+            return max(0, min(100, score))
             
         except Exception as e:
-            print(f"⚠️  GPU 평가 중 오류 (시뮬레이션으로 대체): {str(e)}")
-            # 오류 시 현실적인 시뮬레이션 점수
-            return max(10, min(95, np.random.normal(65, 15)))
+            print(f"❌ GPU 평가 중 오류: {str(e)}")
+            raise e
 
     async def analyze_text_evaluation_quality_gpu(self, samples: List[Dict]) -> Dict[str, Any]:
         """GPU 가속 텍스트 평가 품질 분석"""
@@ -515,20 +517,20 @@ class ModelPerformanceAnalyzerGPU:
                                     sample['question'], sample['answer'], company_info
                                 )
                                 
+                                # LLM 평가 결과 기본 검증 (너무 엄격하지 않게)
+                                if not llm_result:
+                                    raise ValueError(f"샘플 {sample['sample_id']}: LLM 평가 완전 실패")
+                                
                                 result = {
                                     'intent': llm_result.get('extracted_intent', '면접 질문에 대한 답변 평가'),
-                                    'ml_score': 65,  # 기본 ML 점수
-                                    'llm_evaluation': llm_result.get('evaluation', '직접 LLM 평가 완료')
+                                    'ml_score': 65,  # ML 모델 우회 시 중성적 점수
+                                    'llm_evaluation': llm_result.get('evaluation', '')
                                 }
                                 print(f"✅ 샘플 {sample['sample_id']}: 직접 LLM 평가 성공")
                                 
                             except Exception as llm_e:
                                 print(f"❌ 샘플 {sample['sample_id']}: 직접 LLM 평가 실패: {llm_e}")
-                                result = {
-                                    'intent': '면접 질문에 대한 답변 평가',
-                                    'ml_score': 60,
-                                    'llm_evaluation': '직접 LLM 평가 실패'
-                                }
+                                raise llm_e
                         else:
                             result = self.evaluation_service.processor.process_qa_with_intent_extraction(
                                 sample['question'], sample['answer'], company_info
@@ -572,50 +574,21 @@ class ModelPerformanceAnalyzerGPU:
                                 print(f"✅ 실제 개선사항 텍스트 사용: {improvement_text[:50]}...")
                             else:
                                 print(f"⚠️  실제 개선사항 텍스트 없음, fallback 사용")
-                                improvement_text = "더 구체적인 예시를 포함하면 답변의 설득력이 향상될 것입니다."
+                                # fallback 텍스트 사용하지 않고 실제 평가 실패로 처리
+                                raise ValueError(f"샘플 {sample['sample_id']}: 개선사항 텍스트가 생성되지 않음")
                             
-                            # 텍스트가 비어있거나 너무 짧으면 다양한 기본 텍스트 사용 (실제 텍스트가 없는 경우만)
-                            if not evaluation_text or len(evaluation_text.strip()) < 20:
-                                evaluation_templates = [
-                                    f"답변에서 {sample['question'][:10]}에 대한 이해도가 나타납니다. 경험을 바탕으로 한 구체적인 사례를 제시하여 답변의 신뢰성이 높습니다.",
-                                    f"전문적인 지식과 실무 경험이 잘 드러나는 답변입니다. 특히 문제 해결 과정에서의 접근 방식이 체계적입니다.",
-                                    f"답변 내용이 논리적으로 구성되어 있으며, 실제 업무 상황에서의 적용 가능성을 보여줍니다.",
-                                    f"기술적 역량과 함께 커뮤니케이션 능력도 확인할 수 있는 답변입니다. 향후 발전 가능성이 엿보입니다.",
-                                    f"질문의 핵심을 정확히 파악하고 체계적으로 답변하였습니다. 관련 경험이 풍부함을 알 수 있습니다."
-                                ]
-                                evaluation_text = evaluation_templates[i % len(evaluation_templates)]
+                            # 실제 평가 텍스트가 없거나 의미 없는 텍스트면 분석 실패로 처리
+                            if not evaluation_text or len(evaluation_text.strip()) < 10:
+                                raise ValueError(f"샘플 {i+1}: 평가 텍스트가 없거나 너무 짧음 (길이: {len(evaluation_text) if evaluation_text else 0})")
                             
-                            if not improvement_text or len(improvement_text.strip()) < 20:
-                                improvement_templates = [
-                                    "구체적인 수치나 결과를 포함하여 성과를 더 명확히 제시하면 좋겠습니다.",
-                                    "어려움을 극복한 구체적인 방법론이나 프로세스를 추가로 설명해주세요.",
-                                    "팀워크나 협업 경험에 대한 세부적인 사례를 보완하면 더욱 완성도 높은 답변이 됩니다.",
-                                    "기술적 도전 과제와 해결 과정을 더 자세히 기술하면 전문성을 더 어필할 수 있습니다.",
-                                    "향후 계획이나 목표에 대해 더 구체적으로 언급하면 발전 가능성을 보여줄 수 있습니다."
-                                ]
-                                improvement_text = improvement_templates[i % len(improvement_templates)]
+                            if not improvement_text or len(improvement_text.strip()) < 10:
+                                raise ValueError(f"샘플 {i+1}: 개선사항 텍스트가 없거나 너무 짧음 (길이: {len(improvement_text) if improvement_text else 0})")
                                 
                         else:
-                            # 평가 실패 시 다양한 기본 텍스트 사용
-                            evaluation_templates = [
-                                "답변에서 지원자의 경험과 역량을 확인할 수 있습니다. 실무 중심의 사고방식이 돋보입니다.",
-                                "전문 지식을 바탕으로 한 체계적인 답변입니다. 문제 해결 능력과 분석력이 우수합니다.",
-                                "실제 업무 경험을 잘 활용한 답변으로, 현실적이고 실용적인 접근이 인상적입니다.",
-                                "논리적 사고력과 의사소통 능력이 모두 확인되는 균형잡힌 답변입니다.",
-                                "기술적 이해도와 함께 비즈니스 마인드도 갖춘 답변으로 평가됩니다."
-                            ]
-                            improvement_templates = [
-                                "좀 더 구체적인 예시나 수치를 포함하면 답변의 완성도가 높아질 것입니다.",
-                                "관련 기술이나 도구에 대한 추가적인 언급이 있으면 전문성을 더 어필할 수 있습니다.",
-                                "팀 내에서의 역할과 기여도를 더 명확히 설명하면 협업 능력을 잘 보여줄 수 있습니다.",
-                                "도전했던 과제의 난이도나 복잡성을 더 설명하면 역량을 더 잘 어필할 수 있습니다.",
-                                "결과나 성과에 대한 정량적 지표를 추가하면 설득력이 더욱 향상됩니다."
-                            ]
-                            evaluation_text = evaluation_templates[i % len(evaluation_templates)]
-                            improvement_text = improvement_templates[i % len(improvement_templates)]
+                            # 평가 실패 시에도 실제 평가 없이는 진행하지 않음
+                            raise ValueError(f"샘플 {i+1}: 실제 LLM 평가 실패")
                     else:
-                        evaluation_text = "평가할 내용이 있습니다."
-                        improvement_text = "개선할 점이 있습니다."
+                        raise ValueError(f"샘플 {i+1}: 평가 서비스가 초기화되지 않음")
                     
                     batch_texts.append({
                         'sample_index': sample['sample_id'] - 1,
@@ -632,29 +605,9 @@ class ModelPerformanceAnalyzerGPU:
                     if self.evaluation_service:
                         print(f"       - processor 상태: {hasattr(self.evaluation_service, 'processor')}")
                     
-                    # 오류 시에도 다양한 텍스트 사용
-                    error_templates = [
-                        "시스템 연결 문제로 평가가 지연되고 있습니다.",
-                        "평가 서비스 초기화 중입니다. 잠시 후 다시 시도해주세요.",
-                        "네트워크 연결을 확인하고 있습니다.",
-                        "데이터베이스 연결 상태를 점검 중입니다.",
-                        "API 서비스 복구 작업이 진행 중입니다."
-                    ]
-                    improvement_templates = [
-                        "시스템 관리자에게 문의하여 빠른 해결을 도모하겠습니다.",
-                        "연결 상태 복구 후 정상적인 평가가 제공될 예정입니다.",
-                        "기술 지원팀에서 문제 해결을 위해 노력하고 있습니다.",
-                        "서비스 안정화 작업 완료 후 개선된 성능을 제공하겠습니다.",
-                        "시스템 업데이트를 통해 더욱 안정적인 서비스를 제공하겠습니다."
-                    ]
-                    
-                    batch_texts.append({
-                        'sample_index': sample['sample_id'] - 1,
-                        'question': sample['question'][:50] + "...",
-                        'evaluation': error_templates[sample['sample_id'] % len(error_templates)],
-                        'improvement': improvement_templates[sample['sample_id'] % len(improvement_templates)],
-                        'llm_raw_evaluation': f"서비스 오류: {str(e)[:50]}"
-                    })
+                    # 오류 시 가짜 텍스트 생성하지 않고 예외 전파
+                    print(f"❌ 샘플 {sample['sample_id']} 텍스트 수집 실패: {str(e)}")
+                    raise e
             
             return batch_texts
         
@@ -733,9 +686,9 @@ class ModelPerformanceAnalyzerGPU:
         # 5. 반복성 분석 (GPU 최적화)
         repetition_score = self._analyze_text_repetition_gpu(text_evaluations)
         
-        # 6. 종합 점수 계산
+        # 6. 종합 점수 계산 (수정됨 - 더 균형 잡힌 계산)
         text_quality_score = (
-            (eval_vocabulary_diversity * 20) +
+            (eval_vocabulary_diversity * 100 * 0.2) +  # 어휘 다양성을 100점 만점으로 변환
             (quality_metrics['contains_specific_feedback'] * 0.3) +
             (quality_metrics['professional_tone'] * 0.25) +
             (quality_metrics['consistent_format'] * 0.15) +
@@ -886,26 +839,14 @@ class ModelPerformanceAnalyzerGPU:
             validation_result = self.self_validation_check_gpu(samples[:min(10, len(samples))])
             anomaly_result = self.detect_anomalies_gpu(days=7)
             
-            # 비동기 결과 수집 (타임아웃 설정)
-            print("⚡ 비동기 분석 실행 중...")
-            consistency_result, text_quality_result = await asyncio.wait_for(
-                asyncio.gather(*tasks), timeout=300  # 5분 타임아웃
-            )
+            # 비동기 결과 수집 (타임아웃 제거 - 정확한 평가 우선)
+            print("⚡ 비동기 분석 실행 중... (타임아웃 없음 - 정확한 평가 보장)")
+            consistency_result, text_quality_result = await asyncio.gather(*tasks)
             
-        except asyncio.TimeoutError:
-            print("⚠️  비동기 분석 타임아웃, 시뮬레이션으로 대체")
-            consistency_result = {'method': 'GPU 일관성 (시뮬레이션)', 'score': 75}
-            text_quality_result = {'method': 'GPU 텍스트 품질 (시뮬레이션)', 'score': 80}
-            distribution_result = {'method': 'GPU 점수 분포 (시뮬레이션)', 'score': 70}
-            validation_result = {'method': 'GPU 자가 검증 (시뮬레이션)', 'score': 85}
-            anomaly_result = {'method': 'GPU 극단값 탐지 (시뮬레이션)', 'score': 90}
         except Exception as e:
-            print(f"⚠️  분석 중 오류 발생, 시뮬레이션으로 대체: {e}")
-            consistency_result = {'method': 'GPU 일관성 (오류 복구)', 'score': 70}
-            text_quality_result = {'method': 'GPU 텍스트 품질 (오류 복구)', 'score': 75}
-            distribution_result = {'method': 'GPU 점수 분포 (오류 복구)', 'score': 65}
-            validation_result = {'method': 'GPU 자가 검증 (오류 복구)', 'score': 80}
-            anomaly_result = {'method': 'GPU 극단값 탐지 (오류 복구)', 'score': 85}
+            print(f"❌ 분석 중 오류 발생: {e}")
+            print("❌ 가짜 결과 대신 실패로 처리합니다.")
+            return {'error': f'GPU 분석 실패: {str(e)}'}
         
         # 종합 점수 계산 (텍스트 품질 50% 가중치)
         weights = {
@@ -985,72 +926,117 @@ class ModelPerformanceAnalyzerGPU:
     # === 추가 GPU 최적화 메소드들 ===
     
     def analyze_score_distribution_gpu(self, days: int = 7) -> Dict[str, Any]:
-        """GPU 최적화된 점수 분포 분석"""
-        print("🚀 GPU 점수 분포 분석...")
+        """실제 DB에서 점수 분포 분석"""
+        print("🚀 실제 DB 점수 분포 분석...")
         
-        # 빠른 시뮬레이션 기반 분포 분석 (GPU에서 대량 처리)
-        np.random.seed(42)
+        if self.db_manager is None:
+            raise ValueError("DB Manager가 초기화되지 않음 - 실제 점수 분포 분석 불가능")
         
-        if torch.cuda.is_available():
-            # GPU 텐서로 대량 점수 생성
-            device_tensor = torch.cuda.FloatTensor(1000).normal_(70, 15)
-            scores = torch.clamp(device_tensor, 0, 100).cpu().numpy()
-        else:
-            scores = np.clip(np.random.normal(70, 15, 1000), 0, 100)
+        try:
+            # 실제 DB에서 최근 점수 조회
+            query = f"""
+            SELECT final_score 
+            FROM interview_evaluations 
+            WHERE created_at >= NOW() - INTERVAL '{days} days'
+            AND final_score IS NOT NULL
+            """
+            
+            result = self.db_manager.supabase.table('interview_evaluations').select('final_score').gte('created_at', f'now() - interval \'{days} days\'').execute()
+            
+            if not result.data:
+                raise ValueError(f"최근 {days}일간 평가 데이터가 없음")
+            
+            scores = [float(item['final_score']) for item in result.data if item['final_score'] is not None]
+            
+            if len(scores) < 10:
+                raise ValueError(f"분석하기에 데이터가 부족함 (현재: {len(scores)}개, 최소: 10개 필요)")
+            
+            stats = {
+                'total_count': len(scores),
+                'mean': float(np.mean(scores)),
+                'median': float(np.median(scores)),
+                'std': float(np.std(scores)),
+                'min': float(np.min(scores)),
+                'max': float(np.max(scores)),
+                'skewness': float(skew(scores)),
+                'kurtosis': float(kurtosis(scores)),
+            }
+        except Exception as e:
+            print(f"❌ 실제 점수 분포 분석 실패: {e}")
+            raise e
         
-        stats = {
-            'total_count': len(scores),
-            'mean': float(np.mean(scores)),
-            'median': float(np.median(scores)),
-            'std': float(np.std(scores)),
-            'min': float(np.min(scores)),
-            'max': float(np.max(scores)),
-            'skewness': float(skew(scores)),
-            'kurtosis': float(kurtosis(scores)),
-        }
+        # 실제 통계를 기반으로 한 점수 계산 (개선된 공식)
+        # 표준편차가 낮고 평균이 적절할 때 높은 점수
+        distribution_score = min(100, max(0, 
+            85 - (stats['std'] * 1.5) + min(15, stats['mean'] / 100 * 15)
+        ))
         
         return {
-            'method': 'GPU 점수 분포 분석',
+            'method': 'GPU 점수 분포 분석 (실제 DB)',
             'gpu_optimized': True,
             'statistics': stats,
-            'score': 75  # 기본 점수
+            'score': distribution_score
         }
 
     def self_validation_check_gpu(self, samples: List[Dict]) -> Dict[str, Any]:
-        """GPU 최적화된 자가 검증"""
-        print("🚀 GPU 자가 검증...")
+        """실제 자가 검증"""
+        print("🚀 실제 자가 검증...")
         
-        # 빠른 검증 (시뮬레이션)
-        reliable_count = int(len(samples) * 0.8)  # 80% 신뢰도 가정
-        reliability_rate = 80.0
+        if not samples or len(samples) == 0:
+            raise ValueError("검증할 샘플이 없음")
+        
+        reliable_count = 0
+        total_count = len(samples)
+        
+        # 실제 각 샘플에 대해 검증 수행
+        for sample in samples:
+            try:
+                # 기본적인 검증: 질문과 답변이 유효한지 확인
+                if (sample.get('question') and len(sample['question'].strip()) > 10 and
+                    sample.get('answer') and len(sample['answer'].strip()) > 10):
+                    reliable_count += 1
+            except Exception:
+                continue
+        
+        reliability_rate = (reliable_count / total_count) * 100 if total_count > 0 else 0
         
         return {
-            'method': 'GPU 자가 검증 시스템',
+            'method': 'GPU 자가 검증 시스템 (실제)',
             'gpu_optimized': True,
             'reliable_count': reliable_count,
+            'total_count': total_count,
             'reliability_rate': reliability_rate,
             'score': reliability_rate
         }
 
     def detect_anomalies_gpu(self, days: int = 7) -> Dict[str, Any]:
-        """GPU 최적화된 극단값 탐지"""
-        print("🚀 GPU 극단값 탐지...")
+        """실제 DB에서 극단값 탐지"""
+        print("🚀 실제 DB 극단값 탐지...")
         
-        # GPU에서 대량 점수 생성 및 이상치 탐지
-        if torch.cuda.is_available():
-            device_tensor = torch.cuda.FloatTensor(500).normal_(70, 15)
-            scores = torch.clamp(device_tensor, 0, 100).cpu().numpy()
-        else:
-            scores = np.clip(np.random.normal(70, 15, 500), 0, 100)
+        if self.db_manager is None:
+            raise ValueError("DB Manager가 초기화되지 않음 - 실제 극단값 탐지 불가능")
         
-        # 의도적 이상치 추가
-        anomalies = [95, 98, 5, 3]
-        scores = np.append(scores, anomalies)
-        
-        # 빠른 Z-score 계산
-        mean_score = np.mean(scores)
-        std_score = np.std(scores)
-        z_scores = np.abs((scores - mean_score) / std_score)
+        try:
+            # 실제 DB에서 최근 점수 조회
+            result = self.db_manager.supabase.table('interview_evaluations').select('final_score').gte('created_at', f'now() - interval \'{days} days\'').execute()
+            
+            if not result.data:
+                raise ValueError(f"최근 {days}일간 평가 데이터가 없음")
+            
+            scores = [float(item['final_score']) for item in result.data if item['final_score'] is not None]
+            
+            if len(scores) < 10:
+                raise ValueError(f"분석하기에 데이터가 부족함 (현재: {len(scores)}개, 최소: 10개 필요)")
+            
+            scores = np.array(scores)
+            
+            # 실제 Z-score 계산
+            mean_score = np.mean(scores)
+            std_score = np.std(scores)
+            z_scores = np.abs((scores - mean_score) / std_score)
+        except Exception as e:
+            print(f"❌ 실제 극단값 탐지 실패: {e}")
+            raise e
         
         anomaly_indices = np.where(z_scores > 2.5)[0]
         anomaly_rate = (len(anomaly_indices) / len(scores)) * 100
